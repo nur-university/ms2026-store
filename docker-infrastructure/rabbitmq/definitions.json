@@ -98,6 +98,13 @@
                         "type": "fanout",
                         "durable": true,
                         "auto_delete": false
+                },
+                {
+                        "name": "order-payment-cancellation-requested",
+                        "vhost": "/",
+                        "type": "fanout",
+                        "durable": true,
+                        "auto_delete": false
                 }
         ],
         "queues": [
@@ -169,6 +176,12 @@
                 },
                 {
                         "name": "inventory-order-stock-release-requested",
+                        "vhost": "/",
+                        "durable": true,
+                        "auto_delete": false
+                },
+                {
+                        "name": "payments-order-payment-cancellation-requested",
                         "vhost": "/",
                         "durable": true,
                         "auto_delete": false
@@ -256,6 +269,13 @@
                         "source": "order-stock-release-requested",
                         "vhost": "/",
                         "destination": "inventory-order-stock-release-requested",
+                        "destination_type": "queue",
+                        "routing_key": ""
+                },
+                {
+                        "source": "order-payment-cancellation-requested",
+                        "vhost": "/",
+                        "destination": "payments-order-payment-cancellation-requested",
                         "destination_type": "queue",
                         "routing_key": ""
                 }
