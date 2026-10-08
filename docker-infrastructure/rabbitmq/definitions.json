@@ -79,13 +79,6 @@
                         "auto_delete": false
                 },
                 {
-                        "name": "payment-failed",
-                        "vhost": "/",
-                        "type": "fanout",
-                        "durable": true,
-                        "auto_delete": false
-                },
-                {
                         "name": "order-paid",
                         "vhost": "/",
                         "type": "fanout",
@@ -101,6 +94,13 @@
                 },
                 {
                         "name": "order-payment-cancellation-requested",
+                        "vhost": "/",
+                        "type": "fanout",
+                        "durable": true,
+                        "auto_delete": false
+                },
+                {
+                        "name": "order-delivered",
                         "vhost": "/",
                         "type": "fanout",
                         "durable": true,
@@ -163,12 +163,6 @@
                         "auto_delete": false
                 },
                 {
-                        "name": "orders-payment-failed",
-                        "vhost": "/",
-                        "durable": true,
-                        "auto_delete": false
-                },
-                {
                         "name": "inventory-order-paid",
                         "vhost": "/",
                         "durable": true,
@@ -182,6 +176,12 @@
                 },
                 {
                         "name": "payments-order-payment-cancellation-requested",
+                        "vhost": "/",
+                        "durable": true,
+                        "auto_delete": false
+                },
+                {
+                        "name": "orders-order-delivered",
                         "vhost": "/",
                         "durable": true,
                         "auto_delete": false
@@ -252,13 +252,6 @@
                         "routing_key": ""
                 },
                 {
-                        "source": "payment-failed",
-                        "vhost": "/",
-                        "destination": "orders-payment-failed",
-                        "destination_type": "queue",
-                        "routing_key": ""
-                },
-                {
                         "source": "order-paid",
                         "vhost": "/",
                         "destination": "inventory-order-paid",
@@ -276,6 +269,13 @@
                         "source": "order-payment-cancellation-requested",
                         "vhost": "/",
                         "destination": "payments-order-payment-cancellation-requested",
+                        "destination_type": "queue",
+                        "routing_key": ""
+                },
+                {
+                        "source": "order-delivered",
+                        "vhost": "/",
+                        "destination": "orders-order-delivered",
                         "destination_type": "queue",
                         "routing_key": ""
                 }
