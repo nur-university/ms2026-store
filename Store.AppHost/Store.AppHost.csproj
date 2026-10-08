@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <Sdk Name="Aspire.AppHost.Sdk" Version="9.5.2" />
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UserSecretsId>0bb328c5-2214-49b2-b78e-a82a5174af48</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Aspire.Hosting.AppHost" Version="9.5.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Services\ApiGateway\ApiGateway.WebApp\ApiGateway.WebApp.csproj" />
+
+    <ProjectReference Include="..\..\Services\Identity\Identity.WebApi\Identity.WebApi.csproj" />
+    <ProjectReference Include="..\..\Services\Identity\Identity.WorkerService\Identity.WorkerService.csproj" />
+
+    <ProjectReference Include="..\..\Services\Catalog\src\Catalog.WebApi\Catalog.WebApi.csproj" />
+    <ProjectReference Include="..\..\Services\Catalog\src\Catalog.WorkerService\Catalog.WorkerService.csproj" />
+
+    <ProjectReference Include="..\..\Services\Inventory\src\Inventory.WebApi\Inventory.WebApi.csproj" />
+    <ProjectReference Include="..\..\Services\Inventory\src\Inventory.WorkerService\Inventory.WorkerService.csproj" />
+
+    <ProjectReference Include="..\..\Services\Orders\src\Orders.WebApi\Orders.WebApi.csproj" />
+    <ProjectReference Include="..\..\Services\Orders\src\Orders.WorkerService\Orders.WorkerService.csproj" />
+
+    <ProjectReference Include="..\..\Services\Payments\src\Payments.WebApi\Payments.WebApi.csproj" />
+    <ProjectReference Include="..\..\Services\Payments\src\Payments.WorkerService\Payments.WorkerService.csproj" />
+  </ItemGroup>
+
+</Project>

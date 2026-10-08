@@ -1,0 +1,99 @@
+
+networks:
+  microservice-net:
+    driver: bridge
+
+services:
+
+  postgres_server:
+    image: postgres:latest
+    container_name: postgres-server
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgresspassword
+      - POSTGRES_DB=StoreIdentity
+    ports:
+      - "5432:5432"
+    networks:
+      - microservice-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13.7-management
+    container_name: rabbitmq-server
+    ports:
+      - "15672:15672"
+      - "5672:5672"
+    volumes:
+      - ./docker-infrastructure/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbitmq_management load_definitions \"/etc/rabbitmq/definitions.json\""
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+    networks:
+      - microservice-net
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  vault:
+    image: hashicorp/vault
+    container_name: vault-server
+    ports:
+      - "8200:8200"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=vaultroot
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    volumes:
+      - ./docker-infrastructure/vault/vault-init.sh:/vault-init.sh
+    healthcheck:
+      test: [ "CMD", "wget", "--spider", "--proxy", "off", "http://localhost:8200/v1/sys/health?standbyok=true" ]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+
+  consul:
+    image: hashicorp/consul
+    container_name: consul-server
+    ports:
+      - "8500:8500"
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.53
+    container_name: jaeger
+    ports:
+      - "16686:16686"     # Jaeger UI
+      - "6831:6831/udp"   # Jaeger Agent (UDP)
+      - "14250:14250"     # Jaeger Collector (gRPC)
+    networks:
+      - microservice-net
+
+  seq:
+    image: datalust/seq:latest
+    container_name: seq
+    ports:
+      - "5341:80"
+    environment:
+      - ACCEPT_EULA=Y
+    networks:
+      - microservice-net

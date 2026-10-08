@@ -1,0 +1,11 @@
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    ports:
+      - "4317:4317"  # gRPC para apps instrumentadas
+      - "4318:4318"  # HTTP (opcional)
+      - "8888:8888"  # Debug
+    volumes:
+      - ./otel-collector-config.yaml:/otel-local-config.yaml
+    command: ["--config", "/otel-local-config.yaml"]

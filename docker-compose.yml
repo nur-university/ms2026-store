@@ -1,0 +1,343 @@
+# Brings up the ENTIRE Store system in containers: infrastructure (Postgres,
+# RabbitMQ, Vault, Consul, Jaeger, Seq) plus all 11 microservice processes
+# (WebApi + WorkerService for Identity/Catalog/Inventory/Orders/Payments, and
+# the ApiGateway). This is a standalone alternative to:
+#   - Store/start-infrastructure.* (infra only) + running each project from
+#     Visual Studio / `dotnet run`, or
+#   - Store/Store.AppHost (.NET Aspire; orchestrates the projects but not
+#     the infrastructure containers).
+#
+# Usage (from the Store/ folder):
+#   docker compose up -d --build
+#   docker compose logs -f apigateway-webapp
+#   docker compose down -v        # -v also drops Postgres/RabbitMQ/Vault data
+#
+# Notes:
+#   - Infrastructure is NOT redefined here: `include:` below pulls in
+#     ./docker-compose-only-infrastructure.yml as-is, so there is exactly one
+#     definition of Postgres/RabbitMQ/Vault/Consul/Jaeger/Seq shared by this
+#     file and Store/start-infrastructure.*.
+#   - vault-init mounts the SAME script docker-infrastructure already uses
+#     (docker-infrastructure/vault/vault-init.sh), replacing the manual
+#     `docker exec vault-server sh /vault-init.sh` step with a one-shot
+#     container that runs automatically. That script defaults to the plain
+#     host workflow's addresses (Vault/Postgres at localhost); the
+#     `environment:` block below overrides them to container DNS names.
+#   - Services build from the REPO ROOT (context: ..), not their own folder,
+#     so the Nur.Store2026.*/Joseco.* packages resolve as local ProjectReferences
+#     (see Store/docker/Dockerfile) instead of NuGet packages that were never
+#     actually published anywhere reachable.
+#   - Everything talks over `microservice-net` (defined by the included file)
+#     using service/container names as hostnames (e.g. "postgres-server",
+#     "rabbitmq"); the ports published to the host below are only for
+#     reaching things from outside Docker (browser, psql, Consul/Vault/Seq/
+#     Jaeger UIs, etc).
+#   - Discovery: all 5 WebApis self-register in Consul on startup with an
+#     HTTP health check attached (see each Services/*/**/Infrastructure/
+#     ServiceRegistration.cs) - there is no separate consul-init step
+#     anymore. ServiceRegistration__Host/Port below tell each service to
+#     register itself under its own container DNS name/port so the gateway
+#     (which now queries Consul's health-filtered catalog, not the raw
+#     agent list) can actually reach it and stops routing to instances
+#     whose health check is failing.
+
+include:
+  - path: ./docker-compose-only-infrastructure.yml
+
+services:
+
+  # ---------------------------------------------------------------------
+  # One-shot bootstrap (replaces the manual `docker exec ... init.sh` step)
+  # ---------------------------------------------------------------------
+
+  vault-init:
+    image: hashicorp/vault:latest
+    volumes:
+      - ./docker-infrastructure/vault/vault-init.sh:/vault-init.sh
+    environment:
+      VAULT_ADDR: http://vault:8200
+      POSTGRES_HOST: postgres-server
+    entrypoint: ["sh", "/vault-init.sh"]
+    command: []
+    depends_on:
+      vault:
+        condition: service_healthy
+    networks:
+      - microservice-net
+    restart: "no"
+
+  # ---------------------------------------------------------------------
+  # Services (built from the repo root - see Store/docker/Dockerfile)
+  # ---------------------------------------------------------------------
+
+  identity-webapi:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Identity/Identity.WebApi/Identity.WebApi.csproj
+        ASSEMBLY_NAME: Identity.WebApi.dll
+    container_name: identity-webapi
+    ports:
+      - "7081:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      IdentityDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreIdentity;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      ServiceRegistration__ServiceDiscoveryAddress: http://consul:8500
+      ServiceRegistration__Host: http://identity-webapi
+      ServiceRegistration__Port: "8080"
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  identity-workerservice:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Identity/Identity.WorkerService/Identity.WorkerService.csproj
+        ASSEMBLY_NAME: Identity.WorkerService.dll
+    container_name: identity-workerservice
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      IdentityDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreIdentity;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  catalog-webapi:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Catalog/src/Catalog.WebApi/Catalog.WebApi.csproj
+        ASSEMBLY_NAME: Catalog.WebApi.dll
+    container_name: catalog-webapi
+    ports:
+      - "7291:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      CatalogDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreCatalog;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      ServiceRegistration__ServiceDiscoveryAddress: http://consul:8500
+      ServiceRegistration__Host: http://catalog-webapi
+      ServiceRegistration__Port: "8080"
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  catalog-workerservice:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Catalog/src/Catalog.WorkerService/Catalog.WorkerService.csproj
+        ASSEMBLY_NAME: Catalog.WorkerService.dll
+    container_name: catalog-workerservice
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      CatalogDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreCatalog;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  inventory-webapi:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Inventory/src/Inventory.WebApi/Inventory.WebApi.csproj
+        ASSEMBLY_NAME: Inventory.WebApi.dll
+    container_name: inventory-webapi
+    ports:
+      - "7050:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      InventoryDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreInventory;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      ServiceRegistration__ServiceDiscoveryAddress: http://consul:8500
+      ServiceRegistration__Host: http://inventory-webapi
+      ServiceRegistration__Port: "8080"
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  inventory-workerservice:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Inventory/src/Inventory.WorkerService/Inventory.WorkerService.csproj
+        ASSEMBLY_NAME: Inventory.WorkerService.dll
+    container_name: inventory-workerservice
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      InventoryDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreInventory;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  orders-webapi:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Orders/src/Orders.WebApi/Orders.WebApi.csproj
+        ASSEMBLY_NAME: Orders.WebApi.dll
+    container_name: orders-webapi
+    ports:
+      - "7022:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      OrdersDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreOrders;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      ServiceRegistration__ServiceDiscoveryAddress: http://consul:8500
+      ServiceRegistration__Host: http://orders-webapi
+      ServiceRegistration__Port: "8080"
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  orders-workerservice:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Orders/src/Orders.WorkerService/Orders.WorkerService.csproj
+        ASSEMBLY_NAME: Orders.WorkerService.dll
+    container_name: orders-workerservice
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      OrdersDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StoreOrders;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  payments-webapi:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Payments/src/Payments.WebApi/Payments.WebApi.csproj
+        ASSEMBLY_NAME: Payments.WebApi.dll
+    container_name: payments-webapi
+    ports:
+      - "7210:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      PaymentsDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StorePayments;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      ServiceRegistration__ServiceDiscoveryAddress: http://consul:8500
+      ServiceRegistration__Host: http://payments-webapi
+      ServiceRegistration__Port: "8080"
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  payments-workerservice:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/Payments/src/Payments.WorkerService/Payments.WorkerService.csproj
+        ASSEMBLY_NAME: Payments.WorkerService.dll
+    container_name: payments-workerservice
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      PaymentsDatabaseConnectionString__ConnectionString: "Host=postgres-server;Port=5432;Database=StorePayments;Username=postgres;Password=postgresspassword;Include Error Detail=true"
+      RabbitMqSettings__Host: rabbitmq
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      postgres_server:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - microservice-net
+
+  apigateway-webapp:
+    build:
+      context: ..
+      dockerfile: Store/docker/Dockerfile
+      args:
+        PROJECT_PATH: Services/ApiGateway/ApiGateway.WebApp/ApiGateway.WebApp.csproj
+        ASSEMBLY_NAME: ApiGateway.WebApp.dll
+    container_name: apigateway-webapp
+    ports:
+      - "7273:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ServiceRegistration__ServiceDiscoveryAddress: http://consul:8500
+      Seq__ServerUrl: http://seq:80
+      JaegerSettings__Host: jaeger
+    depends_on:
+      consul:
+        condition: service_started
+    networks:
+      - microservice-net

@@ -1,0 +1,13 @@
+services:
+  consul:
+    image: hashicorp/consul
+    container_name: consul-server
+    ports:
+      - "8500:8500"
+    networks:
+      - consul-net
+    command: agent -dev -client=0.0.0.0
+
+networks:
+  consul-net:
+    driver: bridge
