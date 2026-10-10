@@ -15,3 +15,44 @@ datasources:
     type: jaeger
     access: proxy
     url: http://jaeger:16686
+
+  # Estado actual del negocio (ordenes por estado, stock, ventas pagadas sin retirar): se consulta a la base
+  # de cada servicio, solo lectura. Credenciales de desarrollo, las mismas de docker-compose-only-infrastructure.yml.
+  - name: Orders DB
+    uid: pg-orders
+    type: postgres
+    access: proxy
+    url: postgres-server:5432
+    user: postgres
+    secureJsonData:
+      password: postgresspassword
+    jsonData:
+      database: StoreOrders
+      sslmode: disable
+      postgresVersion: 1700
+
+  - name: Payments DB
+    uid: pg-payments
+    type: postgres
+    access: proxy
+    url: postgres-server:5432
+    user: postgres
+    secureJsonData:
+      password: postgresspassword
+    jsonData:
+      database: StorePayments
+      sslmode: disable
+      postgresVersion: 1700
+
+  - name: Inventory DB
+    uid: pg-inventory
+    type: postgres
+    access: proxy
+    url: postgres-server:5432
+    user: postgres
+    secureJsonData:
+      password: postgresspassword
+    jsonData:
+      database: StoreInventory
+      sslmode: disable
+      postgresVersion: 1700

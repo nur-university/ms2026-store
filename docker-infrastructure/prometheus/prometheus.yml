@@ -14,8 +14,16 @@ scrape_configs:
     static_configs:
       - targets: ["otel-collector:8888"]
 
-  # Plugin rabbitmq_prometheus: profundidad de colas, unacked, conexiones...
+  # Plugin rabbitmq_prometheus, agregado (conexiones, canales, tasas globales).
   - job_name: rabbitmq
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  # Lo mismo por cola: mensajes listos / sin confirmar y consumidores (incluye las colas .error).
+  - job_name: rabbitmq-queues
+    metrics_path: /metrics/detailed
+    params:
+      family: ["queue_coarse_metrics", "queue_consumer_count"]
     static_configs:
       - targets: ["rabbitmq:15692"]
 
