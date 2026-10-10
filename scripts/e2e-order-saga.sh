@@ -12,10 +12,14 @@
 # Scenarios: A) full sale: pay at the cashier, then pick up   B) cancel an unpaid sale   C) partial reservation
 #            D) price comes from the catalog   E) request validation   F) payment methods and invoice
 #            G) a paid sale cannot be canceled   I) draft sales note   J) invoice detail and pickup by invoice
-#            K) a paid sale nobody picked up: listing and manual annulment   H) permissions per role
+#            K) a paid sale nobody picked up: listing and manual annulment
+#            L) write-offs and opening balance: created pending, approved or rejected   M) inventory queries and kardex
+#            H) permissions per role
 #
-# WARNING: it writes to the local development databases: it creates orders, payments, invoices and reservations, creates
-# four test users (removed at the end) and permanently deducts 3 units of ITEM_WITH_STOCK (scenarios A and J). Run it only against a disposable dev environment.
+# WARNING: it writes to the local development databases: it creates orders, payments, invoices, reservations, write-offs
+# and an opening balance, creates five test users (removed at the end), permanently deducts 4 units of ITEM_WITH_STOCK
+# (scenarios A, J and L) and adds 2 at its current average cost (L). Run it only against a disposable dev environment;
+# dev-restore-demo-data.sh puts the data back.
 #
 # Overridable through environment variables:
 #   STORE_USER / STORE_PASSWORD   administrator login (default: the user seeded by docker-infrastructure/vault/vault-init.sh)
@@ -60,11 +64,19 @@ one_tv() { echo "[{\"productId\":\"$TV\",\"quantity\":1}]"; }
 collect() { http POST $PAYMENTS/api/payment/orders/$2/collect "$1" "$3"; }   # token orderId json
 cancel() { http POST $ORDERS/api/order/$2/cancel "$1"; }                       # token orderId
 deliver() { http POST $INVENTORY/api/transaction/orders/$2/deliver "$1"; }    # token orderId
+# jget URL TOKEN PYTHON-EXPRESSION -> evaluates the expression over the JSON response, bound to d
+jget() { curl -sk -m 20 -H "Authorization: Bearer $2" "$1" | python -c "import json,sys; d=json.load(sys.stdin); print(eval(sys.argv[1]))" "$3"; }
+# newtx TOKEN JSON -> creates an inventory transaction by hand and prints its id (or the error response)
+newtx() { curl -sk -m 20 -X POST $INVENTORY/api/transaction -H "Authorization: Bearer $1" -H 'content-type: application/json' \
+  -d "$2" | python -c "import json,sys; d=json.load(sys.stdin); print(d.get('id') or d)"; }
+approve() { http POST $INVENTORY/api/transaction/complete "$1" "{\"transactionId\":\"$2\"}"; }               # token transactionId
+reject()  { http POST $INVENTORY/api/transaction/reject "$1" "{\"transactionId\":\"$2\",\"reason\":\"$3\"}"; } # token transactionId reason
+itemcost() { psql StoreInventory "select \"unitaryCost\" from item where \"itemId\"='$1'"; }
 
 # ---- test users, one per role (register-user creates the account, the role is assigned in the database)
 ADMIN=$(login "${STORE_USER:-joseco48@gmail.com}" "${STORE_PASSWORD:-admin@123}")
 [ -n "$ADMIN" ] || { echo "Login failed"; exit 1; }
-declare -A ROLE_OF=([advisor]=SalesAdvisor [cashier]=Cashier [clerk]=WarehouseClerk [supervisor]=SalesSupervisor)
+declare -A ROLE_OF=([advisor]=SalesAdvisor [cashier]=Cashier [clerk]=WarehouseClerk [supervisor]=SalesSupervisor [manager]=InventoryManager)
 declare -A TOKEN
 cleanup() {
   for u in "${!ROLE_OF[@]}"; do
@@ -86,7 +98,7 @@ for u in "${!ROLE_OF[@]}"; do
   TOKEN[$u]=$(login "e2e-$u@store.test" "$TEST_PASSWORD")
   [ -n "${TOKEN[$u]}" ] || { echo "Login of the test user $u failed"; exit 1; }
 done
-ADVISOR=${TOKEN[advisor]}; CASHIER=${TOKEN[cashier]}; CLERK=${TOKEN[clerk]}; SUPERVISOR=${TOKEN[supervisor]}
+ADVISOR=${TOKEN[advisor]}; CASHIER=${TOKEN[cashier]}; CLERK=${TOKEN[clerk]}; SUPERVISOR=${TOKEN[supervisor]}; MANAGER=${TOKEN[manager]}
 
 echo "== Baseline stock/reserved/available of the product: $(item $TV)"
 read S0 R0 A0 <<< "$(item $TV | tr / ' ')"
@@ -95,6 +107,7 @@ echo; echo "== A. Full sale: advisor creates it, the cashier collects in cash, t
 A=$(create_order "$ADVISOR" "[{\"productId\":\"$TV\",\"quantity\":2}]" ',"customerName":"Ana Perez","customerDocument":"1234567"'); echo "  sales note $A"
 wait_for "sales note status"        "ostatus $A" PaymentInProcess
 wait_for "stock reserved +2"        "item $TV" "$S0/$((R0+2))/$((A0-2))"
+expect   "the reservation is a sale" "$(psql StoreInventory "select concept from transaction where \"sourceId\"='$A'")" Sale
 wait_for "charge order is pending"  "pstatus $A" Pending
 expect   "customer reaches the charge order" "$(json $PAYMENTS/api/payment/orders/$A "$CASHIER" customerName)" "Ana Perez"
 expect   "the pending queue lists it" "$(curl -sk -m 20 -H "Authorization: Bearer $CASHIER" "$PAYMENTS/api/payment/pending?pageSize=100" | python -c "import json,sys; print(sum(1 for i in json.load(sys.stdin)['items'] if i['orderId']=='$A'))")" 1
@@ -236,6 +249,61 @@ expect   "flagged for refund"        "$(json $ORDERS/api/order/$F "$SUPERVISOR" 
 wait_for "inventory transaction"     "tstatus $F" Canceled
 wait_for "stock released"            "item $TV" "$S5/$((R5-1))/$((A5+1))"
 expect   "the invoice is still the issued one" "$(json $PAYMENTS/api/payment/orders/$F/invoice "$CASHIER" invoiceNumber)" "$INV1"
+
+echo; echo "== L. Write-offs and opening balance: created pending by the clerk, approved or rejected by the inventory manager"
+read S6 R6 A6 <<< "$(item $TV | tr / ' ')"
+COST=$(itemcost $TV)
+ONE_TV="[{\"itemId\":\"$TV\",\"quantity\":1,\"unitaryCost\":10}]"
+expect   "a sale cannot be created by hand (HTTP)"     "$(http POST $INVENTORY/api/transaction "$CLERK" "{\"concept\":\"Sale\",\"items\":$ONE_TV}")" 400
+expect   "a purchase cannot be created by hand (HTTP)" "$(http POST $INVENTORY/api/transaction "$CLERK" "{\"concept\":\"Purchase\",\"items\":$ONE_TV}")" 400
+expect   "a write-off needs a note (HTTP)"             "$(http POST $INVENTORY/api/transaction "$CLERK" "{\"concept\":\"Damaged\",\"items\":$ONE_TV,\"notes\":\" \"}")" 400
+expect   "unknown concept (HTTP)"                      "$(http POST $INVENTORY/api/transaction "$CLERK" "{\"concept\":\"Stolen\",\"items\":$ONE_TV,\"notes\":\"x\"}")" 400
+expect   "more than the available stock (HTTP)"        "$(http POST $INVENTORY/api/transaction "$CLERK" "{\"concept\":\"Lost\",\"items\":[{\"itemId\":\"$TV\",\"quantity\":999999}],\"notes\":\"x\"}")" 400
+expect   "nothing was reserved by the rejected requests" "$(item $TV)" "$S6/$R6/$A6"
+expect   "a cashier cannot report a write-off (HTTP)"  "$(http POST $INVENTORY/api/transaction "$CASHIER" "{\"concept\":\"Damaged\",\"items\":$ONE_TV,\"notes\":\"x\"}")" 403
+DMG=$(newtx "$CLERK" "{\"concept\":\"Damaged\",\"items\":$ONE_TV,\"notes\":\"e2e: screen broken in the warehouse\"}"); echo "  write-off (damaged) $DMG"
+expect   "the write-off is pending"   "$(json $INVENTORY/api/transaction/$DMG "$MANAGER" status)" Created
+expect   "it reserves the stock"      "$(item $TV)" "$S6/$((R6+1))/$((A6-1))"
+expect   "the clerk cannot approve it (HTTP)" "$(approve "$CLERK" $DMG)" 403
+expect   "the manager approves it (HTTP)" "$(approve "$MANAGER" $DMG)" 200
+expect   "the stock is deducted"      "$(item $TV)" "$((S6-1))/$R6/$((A6-1))"
+expect   "approving it again is harmless (HTTP)" "$(approve "$MANAGER" $DMG)" 200
+expect   "rejecting it afterwards (HTTP)" "$(reject "$MANAGER" $DMG x)" 409
+expect   "deducted only once"         "$(item $TV)" "$((S6-1))/$R6/$((A6-1))"
+MANAGER_ID=$(psql StoreIdentity "select \"Id\" from \"AspNetUsers\" where \"UserName\"='e2e-manager@store.test'")
+expect   "the reviewer is recorded"   "$(json $INVENTORY/api/transaction/$DMG "$MANAGER" reviewedBy)" "$MANAGER_ID"
+LOST=$(newtx "$CLERK" "{\"concept\":\"Lost\",\"items\":$ONE_TV,\"notes\":\"e2e: not found in the stocktaking\"}"); echo "  write-off (lost) $LOST"
+expect   "it reserves the stock"      "$(item $TV)" "$((S6-1))/$((R6+1))/$((A6-2))"
+expect   "the manager rejects it (HTTP)" "$(reject "$MANAGER" $LOST "found it in the back room")" 200
+expect   "the reservation is given back" "$(item $TV)" "$((S6-1))/$R6/$((A6-1))"
+expect   "rejected status and reason" "$(jget $INVENTORY/api/transaction/$LOST "$MANAGER" "d['status'] + '|' + d['rejectionReason']")" "Canceled|found it in the back room"
+TA=$(psql StoreInventory "select \"transactionId\" from transaction where \"sourceId\"='$A'")
+expect   "the reservation of a sale is not approved by hand (HTTP)" "$(approve "$MANAGER" $TA)" 409
+OPEN=$(newtx "$MANAGER" "{\"concept\":\"OpeningBalance\",\"items\":[{\"itemId\":\"$TV\",\"quantity\":2,\"unitaryCost\":$COST}]}"); echo "  opening balance $OPEN"
+expect   "nothing enters while it is pending" "$(item $TV)" "$((S6-1))/$R6/$((A6-1))"
+expect   "the manager approves it (HTTP)" "$(approve "$MANAGER" $OPEN)" 200
+expect   "the stock goes up"          "$(item $TV)" "$((S6+1))/$R6/$((A6+1))"
+expect   "same cost, same average"    "$(itemcost $TV)" "$COST"
+expect   "concepts stored"            "$(psql StoreInventory "select string_agg(concept, ',' order by \"creationDate\") from transaction where \"transactionId\" in ('$DMG','$LOST','$OPEN')")" "Damaged,Lost,OpeningBalance"
+
+echo; echo "== M. Inventory queries: transactions, item stock and kardex"
+expect   "list by concept"            "$(jget "$INVENTORY/api/transaction?concept=Damaged&pageSize=100" "$MANAGER" "sum(1 for i in d['items'] if i['id']=='$DMG')")" 1
+expect   "list by type, status and concept" "$(jget "$INVENTORY/api/transaction?type=Exit&status=Canceled&concept=lost&pageSize=100" "$MANAGER" "[i['id'] for i in d['items']].count('$LOST')")" 1
+expect   "list by source"             "$(jget "$INVENTORY/api/transaction?sourceType=orders&concept=Sale&from=$(date -u +%F)&to=$(date -u +%F)&pageSize=100" "$MANAGER" "sum(1 for i in d['items'] if i['id']=='$TA')")" 1
+expect   "invalid filter (HTTP)"      "$(http GET "$INVENTORY/api/transaction?concept=Stolen" "$MANAGER")" 400
+expect   "transaction detail"         "$(jget $INVENTORY/api/transaction/$DMG "$MANAGER" "d['concept'], d['lines'][0]['quantity'], d['notes']")" "('Damaged', 1, 'e2e: screen broken in the warehouse')"
+expect   "unknown transaction (HTTP)" "$(http GET $INVENTORY/api/transaction/$(python -c 'import uuid;print(uuid.uuid4())') "$MANAGER")" 404
+expect   "item stock"                 "$(jget $INVENTORY/api/item/$TV "$CLERK" "f\"{d['stock']}/{d['reserved']}/{d['available']}\"")" "$(item $TV)"
+expect   "unknown item (HTTP)"        "$(http GET $INVENTORY/api/item/$(python -c 'import uuid;print(uuid.uuid4())') "$CLERK")" 404
+MOVES=$(json "$INVENTORY/api/item/$TV/movements?pageSize=1" "$MANAGER" total)
+expect   "the kardex ends at the current stock" "$(json "$INVENTORY/api/item/$TV/movements?pageSize=1&page=$MOVES" "$MANAGER" balanceAfter)" "$(item $TV | cut -d/ -f1)"
+TODAY_MOVES=$(curl -sk -m 20 -H "Authorization: Bearer $MANAGER" "$INVENTORY/api/item/$TV/movements?from=$(date -u +%F)&pageSize=200")
+expect   "today's kardex shows the write-off as an exit" "$(echo "$TODAY_MOVES" | python -c "import json,sys; print([(m['concept'], m['quantityOut']) for m in json.load(sys.stdin)['movements'] if m['transactionId']=='$DMG'])")" "[('Damaged', 1)]"
+expect   "and the opening balance as an entry at its cost" "$(echo "$TODAY_MOVES" | python -c "import json,sys; print([(m['quantityIn'], m['unitaryCost']) for m in json.load(sys.stdin)['movements'] if m['transactionId']=='$OPEN'])")" "[(2, $(python -c "print(float('$COST'))"))]"
+expect   "the rejected write-off did not move the stock" "$(echo "$TODAY_MOVES" | python -c "import json,sys; print(sum(1 for m in json.load(sys.stdin)['movements'] if m['transactionId']=='$LOST'))")" 0
+expect   "the clerk reads the inventory (HTTP)" "$(http GET $INVENTORY/api/item "$CLERK")" 200
+expect   "an advisor cannot read the inventory (HTTP)" "$(http GET $INVENTORY/api/item/$TV "$ADVISOR")" 403
+expect   "a cashier cannot list transactions (HTTP)" "$(http GET $INVENTORY/api/transaction "$CASHIER")" 403
 
 echo; echo "== H. Permissions per role"
 H=$(create_order "$ADMIN" "$(one_tv)"); echo "  sales note $H (created by the administrator)"
