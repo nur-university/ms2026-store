@@ -1,0 +1,3100 @@
+{
+  "info": {
+    "name": "Store · Saga de órdenes",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Colección para probar la saga de la nota de venta de Store: Orders → Inventory → Payments → Inventory.\n\nREQUISITOS\n- Infraestructura Docker arriba (start-infrastructure) y corriendo: Identity (WebApi), Orders (WebApi + WorkerService), Inventory (WebApi + WorkerService) y Payments (WebApi + WorkerService). Se pueden lanzar juntos con Store.AppHost.\n- Postman: desactivar \"SSL certificate verification\" (Settings → General), los servicios usan el certificado de desarrollo de ASP.NET Core. Alternativa: cambiar las variables *Url a http://localhost:<puerto http>.\n- Las variables username/password son las del usuario administrador sembrado por vault-init.sh (solo desarrollo).\n\nCÓMO USARLA\n1. Ejecuta la carpeta \"0 · Preparación\" (login + elegir producto).\n2. Ejecuta cada carpeta con el Runner (Run folder) en orden, o petición por petición. Cada carpeta es independiente y comprueba el estado tras cada paso; los \"Esperar\" sondean la saga hasta 20 s.\n3. Mientras corre, observa Grafana (http://localhost:3000), Jaeger (:16686) y Seq (:5341).\n\nADVERTENCIA: escribe en las bases de desarrollo. La carpeta 1 emite una factura y descuenta 1 unidad de stock de forma permanente; la 5 emite una factura. El resto no deja efecto neto en el stock."
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "identityUrl",
+      "value": "https://localhost:7081"
+    },
+    {
+      "key": "ordersUrl",
+      "value": "https://localhost:7022"
+    },
+    {
+      "key": "paymentsUrl",
+      "value": "https://localhost:7210"
+    },
+    {
+      "key": "inventoryUrl",
+      "value": "https://localhost:7050"
+    },
+    {
+      "key": "username",
+      "value": "joseco48@gmail.com"
+    },
+    {
+      "key": "password",
+      "value": "admin@123"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "productId",
+      "value": ""
+    },
+    {
+      "key": "orderId",
+      "value": ""
+    },
+    {
+      "key": "invoiceNumber",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "0 · Preparación",
+      "description": "Ejecuta primero estas dos peticiones: obtienen el token y eligen el producto con más stock.",
+      "item": [
+        {
+          "name": "Login (administrador)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{identityUrl}}/api/security/login",
+              "host": [
+                "{{identityUrl}}"
+              ],
+              "path": [
+                "api",
+                "security",
+                "login"
+              ]
+            },
+            "description": "Devuelve el JWT como texto (con o sin comillas). Guarda el token en {{token}}.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const token = pm.response.text().replace(/[\"\\s]/g, '');",
+                  "pm.test('Llegó un JWT', () => pm.expect(token.split('.').length).to.eql(3));",
+                  "pm.collectionVariables.set('token', token);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Elegir producto con stock",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item"
+              ]
+            },
+            "description": "Toma el ítem con más unidades disponibles. Para usar otro, edita la variable productId (debe tener precio en Orders)."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const items = pm.response.json();",
+                  "const best = items.slice().sort((a, b) => b.available - a.available)[0];",
+                  "pm.test('Existe un producto con al menos 3 disponibles', () => pm.expect(best && best.available).to.be.at.least(3));",
+                  "pm.collectionVariables.set('productId', best.id); pm.collectionVariables.set('productName', best.itemName);",
+                  "console.log('Producto: ' + best.itemName + ' (' + best.id + '), disponibles: ' + best.available);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "1 · Venta completa: reservar, cobrar y retirar",
+      "description": "Camino feliz de la saga. ATENCIÓN: escribe en la base de desarrollo: emite una factura y descuenta 1 unidad de stock de forma permanente.",
+      "item": [
+        {
+          "name": "Stock antes (línea base)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            },
+            "description": "Guarda stock / reservado / disponible para comparar al final."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "pm.collectionVariables.set('stockBefore', item.stock); pm.collectionVariables.set('reservedBefore', item.reserved); pm.collectionVariables.set('availableBefore', item.available);",
+                  "pm.test('Hay stock para vender', () => pm.expect(item.available).to.be.at.least(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crear nota de venta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "description": "Escribe y completa la nota en un solo paso. Orders valora las líneas con el precio del catálogo y emite OrderStarted.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 1\n    }\n  ],\n  \"customerName\": \"Cliente Postman\",\n  \"customerDocument\": \"1234567\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "const body = pm.response.json();",
+                  "pm.test('Devuelve el id de la nota', () => pm.expect(body.id).to.be.a('string'));",
+                  "pm.collectionVariables.set('orderId', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en PaymentInProcess",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"PaymentInProcess\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventario: stock reservado",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "",
+                  "pm.test('Reservado +1', () => pm.expect(item.reserved).to.eql(Number(pm.collectionVariables.get('reservedBefore')) + 1));",
+                  "pm.test('Disponible -1', () => pm.expect(item.available).to.eql(Number(pm.collectionVariables.get('availableBefore')) - 1));",
+                  "pm.test('El stock físico no cambia aún', () => pm.expect(item.stock).to.eql(Number(pm.collectionVariables.get('stockBefore'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Caja: cola de cobros",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/pending?page=1&pageSize=100",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "pending"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "100"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const body = pm.response.json();",
+                  "pm.test('La orden de cobro está en la cola', () => pm.expect(body.items.some(p => p.orderId === pm.collectionVariables.get('orderId'))).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Caja: ver orden de cobro",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const p = pm.response.json();",
+                  "pm.test('Pendiente', () => pm.expect(p.status).to.eql('Pending'));",
+                  "pm.test('Monto igual al total de la nota', () => pm.expect(p.amount).to.eql(Number(pm.collectionVariables.get('orderTotal'))));",
+                  "pm.test('Trae el detalle de líneas', () => pm.expect(p.lines.length).to.be.at.least(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Caja: cobrar en efectivo",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}/collect",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}",
+                "collect"
+              ]
+            },
+            "description": "Efectivo: amountReceived debe ser >= al monto. Payments emite la factura y publica PaymentCompleted.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"method\": \"Cash\",\n  \"amountReceived\": {{amountReceived}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('amountReceived', Math.ceil(Number(pm.collectionVariables.get('orderTotal'))) + 10);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const r = pm.response.json();",
+                  "pm.test('Se emitió la factura F-########', () => pm.expect(r.invoiceNumber).to.match(/^F-\\d{8}$/));",
+                  "pm.collectionVariables.set('invoiceNumber', r.invoiceNumber);",
+                  "pm.test('Devuelve el cambio', () => pm.expect(r.changeGiven).to.be.at.least(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Caja: cobrar otra vez (idempotente)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}/collect",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}",
+                "collect"
+              ]
+            },
+            "description": "Cobrar una orden ya cobrada devuelve la misma factura; no emite otra ni consume número.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"method\": \"Cash\",\n  \"amountReceived\": {{amountReceived}}\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('amountReceived', Math.ceil(Number(pm.collectionVariables.get('orderTotal'))) + 10);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const r = pm.response.json();",
+                  "pm.test('Es la misma factura', () => pm.expect(r.invoiceNumber).to.eql(pm.collectionVariables.get('invoiceNumber')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en Paid",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"Paid\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en Paid\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en Paid\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: Inventory marca la venta como entregable",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/transaction/pending-exits?page=1&pageSize=100",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "transaction",
+                "pending-exits"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "100"
+                }
+              ]
+            },
+            "description": "OrderPaid llega a Inventory de forma asíncrona (outbox → RabbitMQ). Hasta entonces el almacén recibe 409 al entregar."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{inventoryUrl}}/api/transaction/pending-exits?page=1&pageSize=100');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => body.items.some(p => p.orderId === pm.collectionVariables.get('orderId') && p.paid === true);",
+                  "const onOk = (body) => {  };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Inventory ve la venta como pagada\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Inventory ve la venta como pagada\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Almacén: ventas por preparar",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/transaction/pending-exits?page=1&pageSize=100",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "transaction",
+                "pending-exits"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "100"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const body = pm.response.json();",
+                  "const mine = body.items.find(p => p.orderId === pm.collectionVariables.get('orderId'));",
+                  "pm.test('La venta aparece para el almacén', () => pm.expect(mine).to.exist);",
+                  "pm.test('Figura como pagada con su factura', () => { pm.expect(mine.paid).to.be.true; pm.expect(mine.invoiceNumber).to.eql(pm.collectionVariables.get('invoiceNumber')); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Almacén: consultar por factura",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/transaction/invoices/{{invoiceNumber}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "transaction",
+                "invoices",
+                "{{invoiceNumber}}"
+              ]
+            },
+            "description": "Lo que el cliente tiene derecho a retirar y quién es."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "pm.test('Es la venta de la nota', () => pm.expect(pm.response.json().orderId).to.eql(pm.collectionVariables.get('orderId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Almacén: entregar la mercadería",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/transaction/orders/{{orderId}}/deliver",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "transaction",
+                "orders",
+                "{{orderId}}",
+                "deliver"
+              ]
+            },
+            "description": "Descuenta el stock físico y emite OrderDelivered. También existe POST api/transaction/invoices/{{invoiceNumber}}/deliver."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en Completed",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"Completed\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en Completed\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en Completed\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventario: stock final",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "",
+                  "pm.test('Stock físico -1', () => pm.expect(item.stock).to.eql(Number(pm.collectionVariables.get('stockBefore')) - 1));",
+                  "pm.test('Reservado vuelve al inicial', () => pm.expect(item.reserved).to.eql(Number(pm.collectionVariables.get('reservedBefore'))));",
+                  "pm.test('Disponible -1', () => pm.expect(item.available).to.eql(Number(pm.collectionVariables.get('availableBefore')) - 1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Caja: factura emitida",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}/invoice",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}",
+                "invoice"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const inv = pm.response.json();",
+                  "pm.test('Factura correcta', () => { pm.expect(inv.invoiceNumber).to.eql(pm.collectionVariables.get('invoiceNumber')); pm.expect(inv.method).to.eql('Cash'); });",
+                  "pm.test('Total igual al de la nota', () => pm.expect(inv.total).to.eql(Number(pm.collectionVariables.get('orderTotal'))));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2 · Cancelación: compensación de una venta sin pagar",
+      "description": "Demuestra las compensaciones: Inventory libera la reserva y Payments cancela la orden de cobro. Sin efecto neto en el stock.",
+      "item": [
+        {
+          "name": "Stock antes (línea base)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            },
+            "description": "Guarda stock / reservado / disponible para comparar al final."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "pm.collectionVariables.set('stockBefore', item.stock); pm.collectionVariables.set('reservedBefore', item.reserved); pm.collectionVariables.set('availableBefore', item.available);",
+                  "pm.test('Hay stock para vender', () => pm.expect(item.available).to.be.at.least(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crear nota de venta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "description": "Escribe y completa la nota en un solo paso. Orders valora las líneas con el precio del catálogo y emite OrderStarted.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 1\n    }\n  ],\n  \"customerName\": \"Cliente Postman\",\n  \"customerDocument\": \"1234567\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "const body = pm.response.json();",
+                  "pm.test('Devuelve el id de la nota', () => pm.expect(body.id).to.be.a('string'));",
+                  "pm.collectionVariables.set('orderId', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en PaymentInProcess",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"PaymentInProcess\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventario: stock reservado",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "pm.test('Reservado +1', () => pm.expect(item.reserved).to.eql(Number(pm.collectionVariables.get('reservedBefore')) + 1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancelar la nota",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/cancel",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "cancel"
+              ]
+            },
+            "description": "Solo notas sin pagar. Emite OrderStockReleaseRequested y OrderPaymentCancellationRequested."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en Canceled",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"Canceled\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en Canceled\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en Canceled\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: orden de cobro en Cancelled",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{paymentsUrl}}/api/payment/orders/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => body.status === 'Cancelled';",
+                  "const onOk = (body) => {  };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: orden de cobro en Cancelled\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: orden de cobro en Cancelled\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventario: reserva liberada",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{inventoryUrl}}/api/item/{{productId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => body.reserved === Number(pm.collectionVariables.get('reservedBefore')) && body.stock === Number(pm.collectionVariables.get('stockBefore'));",
+                  "const onOk = (body) => {  };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Reservado vuelve al valor inicial\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Reservado vuelve al valor inicial\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3 · Reserva fallida: stock insuficiente",
+      "description": "Pide más unidades de las que existen. Inventory responde InventoryReservationFailed y Orders deja la nota en Failed; nunca se crea orden de cobro.",
+      "item": [
+        {
+          "name": "Crear nota de venta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "description": "Escribe y completa la nota en un solo paso. Orders valora las líneas con el precio del catálogo y emite OrderStarted.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 999999\n    }\n  ],\n  \"customerName\": \"Cliente Postman\",\n  \"customerDocument\": \"1234567\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "const body = pm.response.json();",
+                  "pm.test('Devuelve el id de la nota', () => pm.expect(body.id).to.be.a('string'));",
+                  "pm.collectionVariables.set('orderId', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en Failed",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"Failed\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en Failed\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en Failed\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Motivo del fallo",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const o = pm.response.json();",
+                  "pm.test('Explica la falta de stock', () => pm.expect((o.failureReason || '').toLowerCase()).to.include('stock'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "No existe orden de cobro",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 404', () => pm.expect(pm.response.code).to.be.oneOf([404]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4 · Borrador: escribir, completar y descartar",
+      "description": "Un borrador no reserva stock ni crea orden de cobro hasta que se confirma. Solo el asesor que lo escribió puede tocarlo.",
+      "item": [
+        {
+          "name": "Stock antes (línea base)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            },
+            "description": "Guarda stock / reservado / disponible para comparar al final."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "pm.collectionVariables.set('stockBefore', item.stock); pm.collectionVariables.set('reservedBefore', item.reserved); pm.collectionVariables.set('availableBefore', item.available);",
+                  "pm.test('Hay stock para vender', () => pm.expect(item.available).to.be.at.least(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crear borrador",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/draft",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "draft"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerName\": \"Borrador Postman\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "pm.collectionVariables.set('orderId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reemplazar las líneas",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/items",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "items"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 1\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cambiar el cliente",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/customer",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "customer"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"customerName\": \"Cliente Borrador\",\n  \"customerDocument\": \"7654321\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ver el borrador",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const o = pm.response.json();",
+                  "pm.test('Es un borrador con una línea', () => { pm.expect(o.status).to.eql('Draft'); pm.expect(o.items.length).to.eql(1); });"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventario: nada reservado todavía",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "pm.test('Reservado sin cambios', () => pm.expect(item.reserved).to.eql(Number(pm.collectionVariables.get('reservedBefore'))));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Confirmar el borrador",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/confirm",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "confirm"
+              ]
+            },
+            "description": "Revalora las líneas con el precio vigente, la nota pasa a Started y empieza la saga."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en PaymentInProcess",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"PaymentInProcess\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancelar la nota",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/cancel",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "cancel"
+              ]
+            },
+            "description": "Solo notas sin pagar. Emite OrderStockReleaseRequested y OrderPaymentCancellationRequested."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en Canceled",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"Canceled\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en Canceled\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en Canceled\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crear otro borrador",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/draft",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "draft"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "pm.collectionVariables.set('orderId', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Descartar el borrador",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "El borrador descartado ya no es accesible",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 o estado Discarded', () => { if (pm.response.code === 200) { pm.expect(pm.response.json().status).to.eql('Discarded'); } else { pm.expect(pm.response.code).to.eql(404); } });"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5 · Venta pagada y no retirada: anulación del supervisor",
+      "description": "Una venta cobrada mantiene su stock reservado hasta el retiro. Un supervisor (orders.order:override) la anula: se libera la reserva y la nota queda Canceled con RefundRequired. Emite una factura (pago por transferencia) pero no descuenta stock.",
+      "item": [
+        {
+          "name": "Stock antes (línea base)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            },
+            "description": "Guarda stock / reservado / disponible para comparar al final."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const item = pm.response.json();",
+                  "pm.collectionVariables.set('stockBefore', item.stock); pm.collectionVariables.set('reservedBefore', item.reserved); pm.collectionVariables.set('availableBefore', item.available);",
+                  "pm.test('Hay stock para vender', () => pm.expect(item.available).to.be.at.least(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crear nota de venta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "description": "Escribe y completa la nota en un solo paso. Orders valora las líneas con el precio del catálogo y emite OrderStarted.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 1\n    }\n  ],\n  \"customerName\": \"Cliente Postman\",\n  \"customerDocument\": \"1234567\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "const body = pm.response.json();",
+                  "pm.test('Devuelve el id de la nota', () => pm.expect(body.id).to.be.a('string'));",
+                  "pm.collectionVariables.set('orderId', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en PaymentInProcess",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"PaymentInProcess\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Caja: cobrar por transferencia",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}/collect",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}",
+                "collect"
+              ]
+            },
+            "description": "Transferencia y tarjeta exigen reference (número de transferencia o voucher del POS).",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"method\": \"BankTransfer\",\n  \"reference\": \"TRF-POSTMAN-0001\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('amountReceived', Math.ceil(Number(pm.collectionVariables.get('orderTotal'))) + 10);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const r = pm.response.json();",
+                  "pm.test('Se emitió la factura F-########', () => pm.expect(r.invoiceNumber).to.match(/^F-\\d{8}$/));",
+                  "pm.collectionVariables.set('invoiceNumber', r.invoiceNumber);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en Paid",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"Paid\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en Paid\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en Paid\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Listar ventas pagadas sin retirar",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order?status=Paid&page=1&pageSize=100",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "Paid"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "100"
+                }
+              ]
+            },
+            "description": "Más antiguas primero. Con paidBeforeDays=N solo las pagadas hace más de N días."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "const body = pm.response.json();",
+                  "pm.test('La venta figura pagada y sin retirar', () => pm.expect(body.items.some(o => o.id === pm.collectionVariables.get('orderId'))).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Una venta pagada no se puede cancelar",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/cancel",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "cancel"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 409', () => pm.expect(pm.response.code).to.be.oneOf([409]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Anular (supervisor)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/annul",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "annul"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"El cliente no retiró la mercadería (prueba Postman)\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota Canceled con reembolso pendiente",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => body.status === 'Canceled' && body.refundRequired === true;",
+                  "const onOk = (body) => {  };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Nota Canceled y RefundRequired\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Nota Canceled y RefundRequired\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Inventario: reserva liberada",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{inventoryUrl}}/api/item/{{productId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => body.reserved === Number(pm.collectionVariables.get('reservedBefore')) && body.stock === Number(pm.collectionVariables.get('stockBefore'));",
+                  "const onOk = (body) => {  };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Stock y reservado vuelven al inicio\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Stock y reservado vuelven al inicio\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6 · Validaciones y casos negativos",
+      "description": "Reglas de negocio que deben rechazarse. Todas dejan las bases como estaban (la nota auxiliar se cancela al final).",
+      "item": [
+        {
+          "name": "Sin token → 401",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "auth": {
+              "type": "noauth"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 401', () => pm.expect(pm.response.code).to.be.oneOf([401]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Nota sin líneas",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rechazada (4xx)', () => pm.expect(pm.response.code).to.be.within(400, 499));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cantidad en cero",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 0\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rechazada (4xx)', () => pm.expect(pm.response.code).to.be.within(400, 499));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Producto inexistente",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "description": "Un producto sin precio en Orders no se puede vender.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"00000000-0000-4000-8000-000000000001\",\n      \"quantity\": 1\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rechazada (4xx)', () => pm.expect(pm.response.code).to.be.within(400, 499));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Crear nota de venta",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ]
+            },
+            "description": "Escribe y completa la nota en un solo paso. Orders valora las líneas con el precio del catálogo y emite OrderStarted.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"items\": [\n    {\n      \"productId\": \"{{productId}}\",\n      \"quantity\": 1\n    }\n  ],\n  \"customerName\": \"Cliente Postman\",\n  \"customerDocument\": \"1234567\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 201', () => pm.expect(pm.response.code).to.be.oneOf([201]));",
+                  "const body = pm.response.json();",
+                  "pm.test('Devuelve el id de la nota', () => pm.expect(body.id).to.be.a('string'));",
+                  "pm.collectionVariables.set('orderId', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en PaymentInProcess",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"PaymentInProcess\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en PaymentInProcess\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Entregar una venta sin pagar → 409",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/transaction/orders/{{orderId}}/deliver",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "transaction",
+                "orders",
+                "{{orderId}}",
+                "deliver"
+              ]
+            },
+            "description": "El almacén no puede entregar hasta que la venta esté pagada."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 409', () => pm.expect(pm.response.code).to.be.oneOf([409]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Método de pago desconocido",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}/collect",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}",
+                "collect"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"method\": \"Bitcoin\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rechazado (4xx)', () => pm.expect(pm.response.code).to.be.within(400, 499));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Transferencia sin referencia",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}/collect",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}",
+                "collect"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"method\": \"BankTransfer\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rechazado (4xx)', () => pm.expect(pm.response.code).to.be.within(400, 499));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Efectivo insuficiente",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}/collect",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}",
+                "collect"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"method\": \"Cash\",\n  \"amountReceived\": 0.01\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Rechazado (4xx)', () => pm.expect(pm.response.code).to.be.within(400, 499));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Seguimos sin pagar",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/orders/{{orderId}}",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "orders",
+                "{{orderId}}"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));",
+                  "pm.test('Sigue Pending', () => pm.expect(pm.response.json().status).to.eql('Pending'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancelar la nota",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}/cancel",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}",
+                "cancel"
+              ]
+            },
+            "description": "Solo notas sin pagar. Emite OrderStockReleaseRequested y OrderPaymentCancellationRequested."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200 o 204', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Esperar: nota en Canceled",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order/{{orderId}}",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order",
+                "{{orderId}}"
+              ]
+            },
+            "description": "Espera (hasta 20 s) a que la saga lleve la nota a ese estado. Si falla, revisa que los workers de Orders, Inventory y Payments estén corriendo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const url = pm.variables.replaceIn('{{ordersUrl}}/api/order/{{orderId}}');",
+                  "const headers = { Authorization: 'Bearer ' + pm.collectionVariables.get('token') };",
+                  "let attempts = 0;",
+                  "const predicate = (body) => [\"Canceled\"].includes(body.status);",
+                  "const onOk = (body) => { pm.collectionVariables.set('orderStatus', body.status); pm.collectionVariables.set('orderTotal', body.total); pm.collectionVariables.set('invoiceNumber', body.invoiceNumber || pm.collectionVariables.get('invoiceNumber')); };",
+                  "function check() {",
+                  "pm.sendRequest({ url: url, method: 'GET', header: headers }, (err, res) => {",
+                  "let body = null;",
+                  "if (!err && res && res.code === 200) { try { body = res.json(); } catch (e) { body = null; } }",
+                  "if (body && predicate(body)) {",
+                  "  pm.test(\"Esperar: nota en Canceled\", () => pm.expect(true).to.be.true);",
+                  "  onOk(body);",
+                  "  return;",
+                  "}",
+                  "if (++attempts >= 40) {",
+                  "  pm.test(\"Esperar: nota en Canceled\", () => { throw new Error('No se alcanzó la condición en 20 s. Última respuesta: ' + JSON.stringify(body)); });",
+                  "  return;",
+                  "}",
+                  "setTimeout(check, 500);",
+                  "});",
+                  "}",
+                  "check();"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "7 · Consultas y observación",
+      "description": "Lecturas útiles para inspeccionar el estado durante la clase.",
+      "item": [
+        {
+          "name": "Notas de venta",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{ordersUrl}}/api/order?page=1&pageSize=10",
+              "host": [
+                "{{ordersUrl}}"
+              ],
+              "path": [
+                "api",
+                "order"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cola de cobros",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{paymentsUrl}}/api/payment/pending?page=1&pageSize=10",
+              "host": [
+                "{{paymentsUrl}}"
+              ],
+              "path": [
+                "api",
+                "payment",
+                "pending"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Ventas por preparar en almacén",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/transaction/pending-exits?page=1&pageSize=10",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "transaction",
+                "pending-exits"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Transacciones de inventario",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/transaction?concept=Sale&page=1&pageSize=10",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "transaction"
+              ],
+              "query": [
+                {
+                  "key": "concept",
+                  "value": "Sale"
+                },
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "10"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Stock de todos los ítems",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Kardex del producto",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{inventoryUrl}}/api/item/{{productId}}/movements?page=1&pageSize=20",
+              "host": [
+                "{{inventoryUrl}}"
+              ],
+              "path": [
+                "api",
+                "item",
+                "{{productId}}",
+                "movements"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.expect(pm.response.code).to.be.oneOf([200]));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
