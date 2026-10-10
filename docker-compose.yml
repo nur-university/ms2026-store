@@ -90,6 +90,7 @@ services:
       ServiceRegistration__Port: "8080"
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -112,6 +113,7 @@ services:
       RabbitMqSettings__Host: rabbitmq
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -140,6 +142,7 @@ services:
       ServiceRegistration__Port: "8080"
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -162,6 +165,7 @@ services:
       RabbitMqSettings__Host: rabbitmq
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -190,6 +194,7 @@ services:
       ServiceRegistration__Port: "8080"
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -212,6 +217,7 @@ services:
       RabbitMqSettings__Host: rabbitmq
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -240,6 +246,7 @@ services:
       ServiceRegistration__Port: "8080"
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -262,6 +269,7 @@ services:
       RabbitMqSettings__Host: rabbitmq
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -290,6 +298,7 @@ services:
       ServiceRegistration__Port: "8080"
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -312,6 +321,7 @@ services:
       RabbitMqSettings__Host: rabbitmq
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       postgres_server:
         condition: service_healthy
@@ -336,6 +346,7 @@ services:
       ServiceRegistration__ServiceDiscoveryAddress: http://consul:8500
       Seq__ServerUrl: http://seq:80
       JaegerSettings__Host: jaeger
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       consul:
         condition: service_started

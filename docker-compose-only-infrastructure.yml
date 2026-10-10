@@ -28,6 +28,7 @@ services:
     ports:
       - "15672:15672"
       - "5672:5672"
+      - "15692:15692"     # rabbitmq_prometheus (lo scrapea Prometheus)
     volumes:
       - ./docker-infrastructure/rabbitmq/definitions.json:/etc/rabbitmq/definitions.json
     environment:
@@ -85,6 +86,54 @@ services:
       - "16686:16686"     # Jaeger UI
       - "6831:6831/udp"   # Jaeger Agent (UDP)
       - "14250:14250"     # Jaeger Collector (gRPC)
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true   # el otel-collector le envia las trazas por OTLP (jaeger:4317)
+    networks:
+      - microservice-net
+
+  # Punto de entrada unico de la telemetria: los servicios exportan por OTLP gRPC (localhost:4317
+  # desde el host, otel-collector:4317 desde otro contenedor). Trazas -> Jaeger, metricas -> Prometheus.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.116.1
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./docker-infrastructure/opentelemetry-collector/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"       # OTLP gRPC
+      - "4318:4318"       # OTLP HTTP
+    depends_on:
+      - jaeger
+    networks:
+      - microservice-net
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus
+    volumes:
+      - ./docker-infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+    networks:
+      - microservice-net
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    volumes:
+      - ./docker-infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker-infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
     networks:
       - microservice-net
 

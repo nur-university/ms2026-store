@@ -1,21 +1,44 @@
+# OpenTelemetry Collector: unico punto de entrada de la telemetria de los servicios (OTLP gRPC :4317).
+#   trazas   -> Jaeger (OTLP)
+#   metricas -> endpoint Prometheus :8889, que scrapea Prometheus
+# Los logs siguen yendo directo a Seq desde Serilog.
 receivers:
   otlp:
     protocols:
       grpc:
+        endpoint: 0.0.0.0:4317
       http:
-
-exporters:
-  otlp:
-    endpoint: "host.docker.internal:14250" # Jaeger gRPC endpoint
-    tls:
-      insecure: true
+        endpoint: 0.0.0.0:4318
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
   batch:
 
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Atributos del recurso (service.name, deployment.environment, ...) como etiquetas
+    # de cada serie: service_name, service_instance_id, ...
+    resource_to_telemetry_conversion:
+      enabled: true
+
 service:
+  telemetry:
+    metrics:
+      # Desde 0.104 escucha solo en localhost; Prometheus lo scrapea desde otro contenedor.
+      address: 0.0.0.0:8888
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
