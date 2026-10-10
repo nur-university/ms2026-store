@@ -11,11 +11,11 @@
 #
 # Scenarios: A) full sale: pay at the cashier, then pick up   B) cancel an unpaid sale   C) partial reservation
 #            D) price comes from the catalog   E) request validation   F) payment methods and invoice
-#            G) a paid sale cannot be canceled   H) permissions per role
+#            G) a paid sale cannot be canceled   I) draft sales note   J) invoice detail and pickup by invoice
+#            K) a paid sale nobody picked up: listing and manual annulment   H) permissions per role
 #
 # WARNING: it writes to the local development databases: it creates orders, payments, invoices and reservations, creates
-# four test users (removed at the end) and permanently deducts 2 units of ITEM_WITH_STOCK (scenario A); scenarios F and H
-# leave 1 more unit reserved each unless they are canceled. Run it only against a disposable dev environment.
+# four test users (removed at the end) and permanently deducts 3 units of ITEM_WITH_STOCK (scenarios A and J). Run it only against a disposable dev environment.
 #
 # Overridable through environment variables:
 #   STORE_USER / STORE_PASSWORD   administrator login (default: the user seeded by docker-infrastructure/vault/vault-init.sh)
@@ -176,6 +176,66 @@ wait_for "sales note status"        "ostatus $F" Paid
 echo; echo "== G. A paid sale cannot be canceled"
 expect   "cancel (HTTP)"            "$(cancel "$ADVISOR" $F)" 409
 wait_for "sales note is still"      "ostatus $F" Paid
+
+echo; echo "== I. Draft sales note: nothing is reserved until the advisor completes it"
+PRICE_TV=$(psql StoreOrders "select price from product where \"productId\"='$TV'")
+read S3 R3 A3 <<< "$(item $TV | tr / ' ')"
+DRAFT=$(curl -sk -m 20 -X POST $ORDERS/api/order/draft -H "Authorization: Bearer $ADVISOR" -H 'content-type: application/json' \
+  -d "{\"items\":$(one_tv),\"customerName\":\"Luis Rojas\"}" | python -c "import json,sys; print(json.load(sys.stdin).get('id'))")
+echo "  draft $DRAFT"
+sleep 3
+expect   "status is Draft"           "$(json $ORDERS/api/order/$DRAFT "$ADVISOR" status)" Draft
+expect   "no stock was reserved"     "$(item $TV)" "$S3/$R3/$A3"
+expect   "no charge order exists"    "$(psql StorePayments "select count(*) from payment where \"sourceId\"='$DRAFT'")" 0
+expect   "another advisor cannot edit it (HTTP)" "$(http PUT $ORDERS/api/order/$DRAFT/items "$SUPERVISOR" "{\"items\":$(one_tv)}")" 404
+expect   "lines can be replaced (HTTP)" "$(http PUT $ORDERS/api/order/$DRAFT/items "$ADVISOR" "{\"items\":[{\"productId\":\"$TV\",\"quantity\":2}]}")" 200
+expect   "estimated total follows the lines" "$(json $ORDERS/api/order/$DRAFT "$ADVISOR" total)" "$(python -c "print(float('$PRICE_TV') * 2)")"
+expect   "customer can be changed (HTTP)" "$(http PUT $ORDERS/api/order/$DRAFT/customer "$ADVISOR" '{"customerName":"Luis Rojas M.","customerDocument":"7654321"}')" 200
+expect   "completing it (HTTP)"       "$(http POST $ORDERS/api/order/$DRAFT/confirm "$ADVISOR")" 200
+wait_for "sale status"               "ostatus $DRAFT" PaymentInProcess
+wait_for "stock reserved +2"         "item $TV" "$S3/$((R3+2))/$((A3-2))"
+wait_for "charge order is pending"   "pstatus $DRAFT" Pending
+expect   "completing it twice (HTTP)" "$(http POST $ORDERS/api/order/$DRAFT/confirm "$ADVISOR")" 409
+expect   "editing a started sale (HTTP)" "$(http PUT $ORDERS/api/order/$DRAFT/items "$ADVISOR" "{\"items\":$(one_tv)}")" 409
+cancel "$ADVISOR" $DRAFT >/dev/null
+wait_for "stock released"            "item $TV" "$S3/$R3/$A3"
+EMPTY=$(curl -sk -m 20 -X POST $ORDERS/api/order/draft -H "Authorization: Bearer $ADVISOR" -H 'content-type: application/json' -d '{}' | python -c "import json,sys; print(json.load(sys.stdin).get('id'))")
+expect   "completing an empty draft (HTTP)" "$(http POST $ORDERS/api/order/$EMPTY/confirm "$ADVISOR")" 400
+expect   "discarding a draft (HTTP)" "$(http DELETE $ORDERS/api/order/$EMPTY "$ADVISOR")" 200
+expect   "discarded draft status"    "$(json $ORDERS/api/order/$EMPTY "$ADVISOR" status)" Discarded
+expect   "completing a discarded draft (HTTP)" "$(http POST $ORDERS/api/order/$EMPTY/confirm "$ADVISOR")" 409
+
+echo; echo "== J. Invoice with the detail of the sale, and pickup identified by the invoice"
+J=$(create_order "$ADVISOR" "$(one_tv)" ',"customerName":"Marta Gomez","customerDocument":"998877"'); echo "  sales note $J"
+wait_for "charge order is pending"  "pstatus $J" Pending
+LINE_NAME=$(curl -sk -m 20 -H "Authorization: Bearer $CASHIER" $PAYMENTS/api/payment/orders/$J | python -c "import json,sys; d=json.load(sys.stdin); print(d['lines'][0]['productName'])")
+expect   "charge order lists the product" "$LINE_NAME" "$(psql StoreOrders "select name from product where \"productId\"='$TV'")"
+expect   "the sale is not entregable by invoice yet" "$(http GET $INVENTORY/api/transaction/pending-exits "$CLERK")" 200
+expect   "pending queue shows it unpaid" "$(curl -sk -m 20 -H "Authorization: Bearer $CLERK" "$INVENTORY/api/transaction/pending-exits?pageSize=100" | python -c "import json,sys; print([i['paid'] for i in json.load(sys.stdin)['items'] if i['orderId']=='$J'])")" "[False]"
+JINV=$(curl -sk -m 20 -X POST $PAYMENTS/api/payment/orders/$J/collect -H "Authorization: Bearer $CASHIER" -H 'content-type: application/json' -d '{"method":"BankTransfer","reference":"TRX-445566"}' | python -c "import json,sys; print(json.load(sys.stdin).get('invoiceNumber',''))")
+echo "  invoice $JINV"
+expect   "invoice lists the lines"   "$(curl -sk -m 20 -H "Authorization: Bearer $CASHIER" $PAYMENTS/api/payment/orders/$J/invoice | python -c "import json,sys; d=json.load(sys.stdin); print(len(d['lines']), d['lines'][0]['subtotal']==d['total'])")" "1 True"
+wait_for "reservation released for pickup" "released $J" yes
+expect   "the clerk looks the invoice up" "$(json $INVENTORY/api/transaction/invoices/$JINV "$CLERK" customerName)" "Marta Gomez"
+expect   "unknown invoice (HTTP)"    "$(http GET $INVENTORY/api/transaction/invoices/F-99999999 "$CLERK")" 404
+read S4 R4 A4 <<< "$(item $TV | tr / ' ')"
+expect   "delivering by invoice (HTTP)" "$(http POST $INVENTORY/api/transaction/invoices/$JINV/deliver "$CLERK")" 200
+wait_for "stock deducted at pickup"  "item $TV" "$((S4-1))/$((R4-1))/$A4"
+wait_for "sales note completed"      "ostatus $J" Completed
+
+echo; echo "== K. A paid sale nobody picked up: it stays reserved until a supervisor intervenes"
+read S5 R5 A5 <<< "$(item $TV | tr / ' ')"
+expect   "the paid sale of scenario F is listed (oldest first)" "$(curl -sk -m 20 -H "Authorization: Bearer $SUPERVISOR" "$ORDERS/api/order?status=Paid&paidBeforeDays=0&pageSize=100" | python -c "import json,sys; print(sum(1 for i in json.load(sys.stdin)['items'] if i['id']=='$F'))")" 1
+expect   "a sale picked up is not listed" "$(curl -sk -m 20 -H "Authorization: Bearer $SUPERVISOR" "$ORDERS/api/order?status=Paid&paidBeforeDays=0&pageSize=100" | python -c "import json,sys; print(sum(1 for i in json.load(sys.stdin)['items'] if i['id']=='$A'))")" 0
+expect   "an advisor cannot annul (HTTP)" "$(http POST $ORDERS/api/order/$F/annul "$ADVISOR" '{"reason":"x"}')" 403
+expect   "annulling needs a reason (HTTP)" "$(http POST $ORDERS/api/order/$F/annul "$SUPERVISOR" '{"reason":"  "}')" 400
+expect   "a picked up sale cannot be annulled (HTTP)" "$(http POST $ORDERS/api/order/$A/annul "$SUPERVISOR" '{"reason":"x"}')" 409
+expect   "the supervisor annuls it (HTTP)" "$(http POST $ORDERS/api/order/$F/annul "$SUPERVISOR" '{"reason":"customer never came back"}')" 200
+wait_for "sales note status"         "ostatus $F" Canceled
+expect   "flagged for refund"        "$(json $ORDERS/api/order/$F "$SUPERVISOR" refundRequired)" True
+wait_for "inventory transaction"     "tstatus $F" Canceled
+wait_for "stock released"            "item $TV" "$S5/$((R5-1))/$((A5+1))"
+expect   "the invoice is still the issued one" "$(json $PAYMENTS/api/payment/orders/$F/invoice "$CASHIER" invoiceNumber)" "$INV1"
 
 echo; echo "== H. Permissions per role"
 H=$(create_order "$ADMIN" "$(one_tv)"); echo "  sales note $H (created by the administrator)"
