@@ -42,8 +42,12 @@ check "TV back to baseline"          "$(item)" "$S0/$R0/$A0"
 echo; echo "== C. Poison message goes to the error queue after the consumer gives up"
 curl -s -u "$AUTH" -X DELETE "$RMQ/queues/%2F/inventory-order-paid.error" -o /dev/null
 publish order-paid "this is not json"
-sleep 4
-check "inventory-order-paid.error holds the message" "$(curl -s -u "$AUTH" "$RMQ/queues/%2F/inventory-order-paid.error" | python -c "import json,sys; print(json.load(sys.stdin).get('messages'))")" 1
+# The queue was just recreated: the management API reports messages=None until its statistics refresh (~5 s).
+for i in $(seq 1 20); do
+  ERRORS=$(curl -s -u "$AUTH" "$RMQ/queues/%2F/inventory-order-paid.error" | python -c "import json,sys; print(json.load(sys.stdin).get('messages'))")
+  [ "$ERRORS" = "1" ] && break; sleep 1
+done
+check "inventory-order-paid.error holds the message" "$ERRORS" 1
 check "main queue is empty (not stuck unacked)"      "$(curl -s -u "$AUTH" "$RMQ/queues/%2F/inventory-order-paid" | python -c "import json,sys; d=json.load(sys.stdin); print(d.get('messages'))")" 0
 echo "  reason header: $(curl -s -u "$AUTH" -X POST "$RMQ/queues/%2F/inventory-order-paid.error/get" -H 'content-type: application/json' -d '{"count":1,"ackmode":"ack_requeue_true","encoding":"auto"}' | python -c "import json,sys; d=json.load(sys.stdin); print(d[0]['properties']['headers'].get('x-failure-reason'))")"
 curl -s -u "$AUTH" -X DELETE "$RMQ/queues/%2F/inventory-order-paid.error" -o /dev/null
